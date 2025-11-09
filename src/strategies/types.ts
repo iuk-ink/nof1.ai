@@ -1,4 +1,22 @@
 /**
+ * open-nof1.ai - AI 加密货币自动交易系统
+ * Copyright (C) 2025 195440
+ * 
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ * 
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Affero General Public License for more details.
+ * 
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+/**
  * 交易策略类型定义
  * 
  * 支持5种交易策略：
@@ -155,104 +173,5 @@ export interface StrategyParams {
    * - 其他策略：false（禁用，由AI主动执行）
    */
   enableCodeLevelProtection: boolean;
-  
-  /**
-   * 代码级自动监控止损配置（可选）
-   * 
-   * 仅当 enableCodeLevelProtection = true 时生效
-   * 系统每10秒自动检查所有持仓，触发条件时立即自动平仓
-   * 
-   * 配置说明：
-   * - 根据杠杆倍数分级保护（低风险、中风险、高风险）
-   * - 杠杆越高，止损越严格（因为杠杆放大亏损）
-   * - AI 无需介入，完全由代码自动执行
-   */
-  codeLevelStopLoss?: {
-    /** 低风险级别：杠杆在 minLeverage-maxLeverage 之间时，亏损达到 stopLossPercent% 触发止损 */
-    lowRisk: {
-      /** 最小杠杆倍数 */
-      minLeverage: number;
-      /** 最大杠杆倍数 */
-      maxLeverage: number;
-      /** 止损阈值（负数），如-6表示亏损6%时止损 */
-      stopLossPercent: number;
-      /** 规则描述，用于日志和AI提示词 */
-      description: string;
-    };
-    /** 中风险级别：杠杆在 minLeverage-maxLeverage 之间时，亏损达到 stopLossPercent% 触发止损 */
-    mediumRisk: {
-      minLeverage: number;
-      maxLeverage: number;
-      stopLossPercent: number;
-      description: string;
-    };
-    /** 高风险级别：杠杆 >= minLeverage 时，亏损达到 stopLossPercent% 触发止损 */
-    highRisk: {
-      minLeverage: number;
-      maxLeverage: number;
-      stopLossPercent: number;
-      description: string;
-    };
-  };
-  
-  /**
-   * 代码级自动监控移动止盈配置（可选）
-   * 
-   * 仅当 enableCodeLevelProtection = true 时生效
-   * 系统每10秒自动跟踪峰值盈利，当盈利从峰值回退达到阈值时自动平仓
-   * 
-   * 配置说明：
-   * - 多阶段规则，盈利越高保护越严格
-   * - 例如：峰值盈利4-6%时，回退1.5%平仓（保底2.5%）
-   * - 峰值盈利25%+时，回退5%平仓（保底20%）
-   * - AI 无需介入，完全由代码自动执行
-   */
-  codeLevelTrailingStop?: {
-    /** 阶段1：峰值盈利在 minProfit-maxProfit% 之间时，回退 drawdownPercent% 触发平仓 */
-    stage1: {
-      /** 阶段名称，如"阶段1" */
-      name: string;
-      /** 最小盈利百分比，如4表示4% */
-      minProfit: number;
-      /** 最大盈利百分比，如6表示6% */
-      maxProfit: number;
-      /** 回退百分比阈值，如1.5表示从峰值回退1.5%时平仓 */
-      drawdownPercent: number;
-      /** 规则描述，如"峰值4-6%，回退1.5%平仓（保底2.5%）" */
-      description: string;
-    };
-    /** 阶段2：峰值盈利在 minProfit-maxProfit% 之间时，回退 drawdownPercent% 触发平仓 */
-    stage2: {
-      name: string;
-      minProfit: number;
-      maxProfit: number;
-      drawdownPercent: number;
-      description: string;
-    };
-    /** 阶段3：峰值盈利在 minProfit-maxProfit% 之间时，回退 drawdownPercent% 触发平仓 */
-    stage3: {
-      name: string;
-      minProfit: number;
-      maxProfit: number;
-      drawdownPercent: number;
-      description: string;
-    };
-    /** 阶段4：峰值盈利在 minProfit-maxProfit% 之间时，回退 drawdownPercent% 触发平仓 */
-    stage4: {
-      name: string;
-      minProfit: number;
-      maxProfit: number;
-      drawdownPercent: number;
-      description: string;
-    };
-    /** 阶段5：峰值盈利 >= minProfit% 时，回退 drawdownPercent% 触发平仓 */
-    stage5: {
-      name: string;
-      minProfit: number;
-      maxProfit: number; // 通常设为 Infinity
-      drawdownPercent: number;
-      description: string;
-    };
-  };
 }
 
