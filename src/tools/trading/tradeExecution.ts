@@ -21,7 +21,7 @@
  */
 import { createTool } from "@voltagent/core";
 import { z } from "zod";
-import { createGateClient } from "../../services/gateClient";
+import { createExchangeClient } from "../../services/exchangeClient";
 import { createClient } from "@libsql/client";
 import { createLogger } from "../../utils/loggerUtils";
 import { getChinaTimeISO } from "../../utils/timeUtils";
@@ -53,7 +53,7 @@ export const openPositionTool = createTool({
     // 开仓时不设置止盈止损，由 AI 在每个周期主动决策
     const stopLoss = undefined;
     const takeProfit = undefined;
-    const client = createGateClient();
+    const client = createExchangeClient();
     const contract = `${symbol}_USDT`;
     
     try {
@@ -119,16 +119,18 @@ export const openPositionTool = createTool({
         const now = Date.now();
         const minutesSinceClose = (now - closeTime) / (1000 * 60);
         const intervalMinutes = Number.parseInt(process.env.TRADING_INTERVAL_MINUTES || "5");
+        const cooldownMinutes = intervalMinutes / 2; // 冷静期调整为半个周期
+
         
-        // 如果距离上次平仓时间不足一个完整交易周期，拒绝开仓
-        if (minutesSinceClose < intervalMinutes) {
+        // 如果距离上次平仓时间不足半个交易周期，拒绝开仓
+        if (minutesSinceClose < cooldownMinutes) {
           return {
             success: false,
-            message: `拒绝开仓 ${symbol}：该币种在 ${minutesSinceClose.toFixed(1)} 分钟前刚平仓，需要等待至少 ${intervalMinutes} 分钟（一个完整交易周期）后才能重新开仓。这是为了防止同一周期内频繁交易，造成不必要的手续费损失和情绪化交易。`,
+            message: `拒绝开仓 ${symbol}：该币种在 ${minutesSinceClose.toFixed(1)} 分钟前刚平仓，需要等待至少 ${cooldownMinutes.toFixed(1)} 分钟（半个交易周期）后才能重新开仓。这是为了防止频繁反复交易，造成不必要的手续费损失。`,
           };
         }
         
-        logger.info(`${symbol} 距离上次平仓已 ${minutesSinceClose.toFixed(1)} 分钟，通过冷静期检查`);
+        logger.info(`${symbol} 距离上次平仓已 ${minutesSinceClose.toFixed(1)} 分钟，通过冷静期检查（冷静期：${cooldownMinutes.toFixed(1)}分钟）`);
       }
       
       // 4. 获取账户信息
@@ -622,7 +624,7 @@ export const closePositionTool = createTool({
     percentage: z.number().min(1).max(100).default(100).describe("平仓百分比（1-100）"),
   }),
   execute: async ({ symbol, percentage }) => {
-    const client = createGateClient();
+    const client = createExchangeClient();
     const contract = `${symbol}_USDT`;
     
     try {
@@ -981,7 +983,7 @@ export const cancelOrderTool = createTool({
     orderId: z.string().describe("订单ID"),
   }),
   execute: async ({ orderId }) => {
-    const client = createGateClient();
+    const client = createExchangeClient();
     
     try {
       await client.cancelOrder(orderId);
