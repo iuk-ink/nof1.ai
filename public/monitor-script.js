@@ -115,6 +115,26 @@ class TradingMonitor {
                 unrealisedPnlEl.className = 'detail-value ' + (data.unrealisedPnl >= 0 ? 'positive' : 'negative');
             }
 
+            // 更新返佣比例
+            const rebatePercentEl = document.getElementById('rebate-percent');
+            if (rebatePercentEl) {
+                rebatePercentEl.textContent = data.feeRebatePercent || 20;
+            }
+
+            // 更新返佣金额
+            const rebateAmountEl = document.getElementById('rebate-amount');
+            if (rebateAmountEl) {
+                const rebate = data.rebateAmount || 0;
+                rebateAmountEl.textContent = '+' + rebate.toFixed(2);
+            }
+
+            // 更新返佣后理论总资产 = 总资产(含未实现盈亏) + 返佣金额
+            const rebateTotalEl = document.getElementById('rebate-total-assets');
+            if (rebateTotalEl) {
+                const rebateTotalAssets = totalBalanceWithPnl + (data.rebateAmount || 0);
+                rebateTotalEl.textContent = rebateTotalAssets.toFixed(2);
+            }
+
             // 更新收益（总资产 - 初始资金）
         const valueChangeEl = document.getElementById('value-change');
         const valuePercentEl = document.getElementById('value-percent');
@@ -164,6 +184,12 @@ class TradingMonitor {
             if (strategyInfoInline) {
                 const protectionMode = data.enableCodeLevelProtection ? '代码级' : 'AI';
                 strategyInfoInline.textContent = `${data.intervalMinutes}分 | ${data.leverageRange} | ${data.positionSizeRange} | ${protectionMode}`;
+            }
+
+            // 更新模型名称
+            const modelName = document.getElementById('model-name');
+            if (modelName) {
+                modelName.textContent = data.modelName || '-';
             }
             
         } catch (error) {
@@ -431,13 +457,13 @@ class TradingMonitor {
 
     // 启动数据更新
     startDataUpdates() {
-        // 每3秒更新账户和持仓（实时数据）
+        // 每5秒更新账户和持仓（实时数据）
         setInterval(async () => {
             await Promise.all([
                 this.loadAccountData(),
                 this.loadPositionsData()
             ]);
-        }, 3000);
+        }, 5000);
 
         // 每10秒更新价格（实时价格）
         setInterval(async () => {

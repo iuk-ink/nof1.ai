@@ -60,7 +60,41 @@ The system currently supports **11 trading strategies**, suitable for different 
 | `rebate-farming` | Rebate Farming | 5 minutes | 10-60 minutes | Medium | Users with high fee rebates |
 | `ai-autonomous` | AI Autonomous | Flexible | AI decides | AI decides | Users who fully trust AI's autonomous decision-making |
 | `multi-agent-consensus` | **Multi-Agent Jury** | **5-10 minutes** | **Hours - Days** | **Medium** | **Investors seeking robust decision-making and risk control** |
-| `alpha-beta` | **Alpha Beta** | **Flexible** | **AI decides** | **AI decides** | **Zero strategy guidance, AI fully autonomous with forced self-review** |
+| `alpha-beta` | **Alpha Beta (Default)** | **5 minutes** | **AI decides** | **Medium** | **AI independent decisions, technical + sentiment analysis, reversal confirmation filter, system default strategy** |
+
+---
+
+## Sentiment Data Assistance
+
+The system retrieves sentiment data through the Gate MCP News endpoint as a supplementary reference to technical analysis, helping each strategy make more comprehensive decisions.
+
+### Sentiment Data Source and Collection
+
+- **Data Source**: Fetches 3 types of sentiment data via the Gate MCP News endpoint: crypto news, exchange announcements, and social sentiment
+- **Collection Method**: Sentiment data is collected in parallel with technical data in each trading cycle
+- **On-Demand Query**: AI can use 3 sentiment tools to query deeper information as needed
+- **Supplementary Role**: Sentiment data is for reference only and does not replace technical analysis; technical analysis remains the core basis for decisions
+- **Fault Isolation**: Failure to obtain sentiment data does not affect the main trading flow
+
+### Sentiment Application by Strategy
+
+| Strategy Type | Sentiment Application |
+|--------------|----------------------|
+| Conservative/Balanced | Sentiment data for risk alerts (e.g., reduce position on major negative news) |
+| Aggressive | Sentiment data for event-driven trading opportunities |
+| AI Autonomous | AI decides how to use sentiment data |
+| Alpha-Beta | Sentiment data as an additional analysis dimension to assist signal scoring |
+
+### Configuration
+
+| Configuration Item | Description | Default |
+|-------------------|-------------|---------|
+| `GATE_NEWS_MCP_ENABLED` | Enable or disable sentiment feature | Enabled by default; set to `false` to disable |
+| `GATE_NEWS_MCP_URL` | MCP endpoint URL | `https://api.gatemcp.ai/mcp/news` |
+
+No additional configuration is required; the system enables sentiment data collection by default.
+
+---
 
 ## Detailed Strategy Descriptions
 
@@ -686,6 +720,7 @@ All strategy implementations follow a unified architectural pattern:
    - Rebate Farming: `src/strategies/rebateFarming.ts` → `getRebateFarmingStrategy()`
    - AI Autonomous: `src/strategies/aiAutonomous.ts` → `getAiAutonomousStrategy()`
    - Multi-Agent Jury: `src/strategies/multiAgentConsensus.ts` → `getMultiAgentConsensusStrategy()`
+   - **Alpha Beta (Default)**: `src/strategies/alphaBeta.ts` → `getAlphaBetaStrategy()`
 
 2. **Prompt Generation**: Each strategy file contains a `generateXxxPrompt()` function that generates strategy-specific decision prompts for the AI
    - Ultra-Short: `generateUltraShortPrompt()`
@@ -696,6 +731,7 @@ All strategy implementations follow a unified architectural pattern:
    - Rebate Farming: `generateRebateFarmingPrompt()`
    - AI Autonomous: `generateAiAutonomousPrompt()`
    - Multi-Agent Jury: `generateMultiAgentConsensusPrompt()`
+   - **Alpha Beta (Default)**: `generateAlphaBetaPrompt()`
 
 3. **Unified Exports**: All strategies are exported through `src/strategies/index.ts` for easy system calls
 
@@ -719,8 +755,10 @@ export function getStrategyParams(strategy: TradingStrategy, maxLeverage: number
       return getBalancedStrategy(maxLeverage);
     case "aggressive":
       return getAggressiveStrategy(maxLeverage);
+    case "alpha-beta":
+      return getAlphaBetaStrategy(maxLeverage);
     default:
-      return getBalancedStrategy(maxLeverage);
+      return getAlphaBetaStrategy(maxLeverage);  // Default: Alpha Beta strategy
   }
 }
 ```
@@ -748,11 +786,13 @@ export function getStrategyParams(strategy: TradingStrategy, maxLeverage: number
   - AI-led decision-making with minimal constraints and maximum freedom
   - Targets medium-long term stable returns (monthly goal 25-50%)
   - Focus on quality over frequency
-- **Added Alpha Beta Strategy** (`alpha-beta`)
-  - Zero strategy guidance, AI fully autonomous decision-making
-  - Forced self-review mechanism (core feature)
+- **Added Alpha Beta Strategy** (`alpha-beta`) -- System default strategy
+  - AI independent decisions, technical + sentiment analysis
+  - Reversal confirmation filter (code-level hard limit, 5m/15m dual confirmation)
+  - Same-symbol cooldown period of 3 trading cycles (code-level hard limit)
+  - Unified stop-loss -3%, position size 12-40%, leverage starting from 6x
+  - Forced self-review mechanism
   - Dual protection mode (code auto + AI proactive)
-  - Learn from history, continuous optimization
 - **Total strategies increased from 9 to 11**
 - Enhanced strategy documentation with complete descriptions of two new strategies
 - Updated strategy switching guide and usage scenarios

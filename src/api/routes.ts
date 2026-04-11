@@ -80,11 +80,21 @@ export function createApiRoutes() {
       // 总资产（不含未实现盈亏）= account.total
       const unrealisedPnl = Number.parseFloat(account.unrealisedPnl || "0");
       const totalBalance = Number.parseFloat(account.total || "0");
-      
+
       // 收益率 = (总资产 - 初始资金) / 初始资金 * 100
       // 总资产不包含未实现盈亏，收益率反映已实现盈亏
       const returnPercent = ((totalBalance - initialBalance) / initialBalance) * 100;
-      
+
+      // 查询累计手续费（所有已平仓交易的手续费总和）
+      const feeResult = await dbClient.execute(
+        "SELECT COALESCE(SUM(fee), 0) as total_fee FROM trades WHERE type = 'close'"
+      );
+      const totalFees = Number.parseFloat(feeResult.rows[0]?.total_fee as string || "0");
+
+      // 返佣比例（从环境变量读取，默认20%）
+      const feeRebatePercent = Number.parseFloat(process.env.FEE_REBATE_PERCENT || "20");
+      const rebateAmount = totalFees * (feeRebatePercent / 100);
+
       return c.json({
         totalBalance,  // 总资产（不包含未实现盈亏）
         availableBalance: Number.parseFloat(account.available || "0"),
@@ -92,6 +102,9 @@ export function createApiRoutes() {
         unrealisedPnl,
         returnPercent,  // 收益率（不包含未实现盈亏）
         initialBalance,
+        totalFees,           // 累计手续费
+        feeRebatePercent,    // 返佣比例（%）
+        rebateAmount,        // 返佣金额
         timestamp: new Date().toISOString(),
       });
     } catch (error: any) {
@@ -138,7 +151,8 @@ export function createApiRoutes() {
             side: size > 0 ? "long" : "short",
             openValue,
             profitTarget: dbPos?.profit_target ? Number(dbPos.profit_target) : null,
-            stopLoss: dbPos?.stop_loss ? Number(dbPos.stop_loss) : null,
+            stopLoss: dbPos?.stop_loss !== null && dbPos?.stop_loss !== undefined ? Number(dbPos.stop_loss) : null,
+            stopLossMode: dbPos?.stop_loss !== null && dbPos?.stop_loss !== undefined ? "pnl_percent" : null,
             openedAt: p.create_time || new Date().toISOString(),
           };
         });
@@ -382,6 +396,7 @@ export function createApiRoutes() {
       return c.json({
         strategy,
         strategyName: strategyNames[strategy] || strategy,
+        modelName: process.env.AI_MODEL_NAME || "deepseek/deepseek-v3.2-exp",
         intervalMinutes,
         maxLeverage: RISK_PARAMS.MAX_LEVERAGE,
         maxPositions: RISK_PARAMS.MAX_POSITIONS,
@@ -578,4 +593,3 @@ export function createApiRoutes() {
 
   return app;
 }
-

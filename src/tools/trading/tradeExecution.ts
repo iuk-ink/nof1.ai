@@ -37,6 +37,85 @@ const dbClient = createClient({
   url: process.env.DATABASE_URL || "file:./.voltagent/trading.db",
 });
 
+function calculateLeveragedPnlPercent(
+  entryPrice: number,
+  currentPrice: number,
+  side: "long" | "short",
+  leverage: number,
+): number {
+  if (entryPrice <= 0 || currentPrice <= 0 || leverage <= 0) {
+    return 0;
+  }
+
+  const priceChangePercent =
+    ((currentPrice - entryPrice) / entryPrice) * 100 * (side === "long" ? 1 : -1);
+
+  return priceChangePercent * leverage;
+}
+
+function parseNullableNumber(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function mergePartialClosePercentage(
+  alreadyClosedPercent: number,
+  currentQuantity: number,
+  closedQuantity: number,
+): number {
+  if (currentQuantity <= 0 || closedQuantity <= 0) {
+    return alreadyClosedPercent;
+  }
+
+  const remainingPercent = Math.max(0, 100 - alreadyClosedPercent);
+  const closedShareOfRemaining = Math.min(1, closedQuantity / currentQuantity);
+
+  return Math.min(
+    100,
+    Number.parseFloat((alreadyClosedPercent + remainingPercent * closedShareOfRemaining).toFixed(4)),
+  );
+}
+
+async function getProfitProtectionStopPercent(currentPnlPercent: number): Promise<number> {
+  const { getTradingStrategy, getStrategyParams } = await import("../../agents/tradingAgent.js");
+  const strategy = getTradingStrategy();
+  const params = getStrategyParams(strategy);
+
+  if (currentPnlPercent >= params.trailingStop.level3.trigger) {
+    return params.trailingStop.level3.stopAt;
+  }
+
+  if (currentPnlPercent >= params.trailingStop.level2.trigger) {
+    return params.trailingStop.level2.stopAt;
+  }
+
+  if (currentPnlPercent >= params.trailingStop.level1.trigger) {
+    return params.trailingStop.level1.stopAt;
+  }
+
+  if (currentPnlPercent >= 1.5) {
+    return 0.5;
+  }
+
+  if (currentPnlPercent >= 0.5) {
+    return 0.2;
+  }
+
+  return 0;
+}
+
+const MIN_SAME_SYMBOL_COOLDOWN_CYCLES = 3;
+const configuredSameSymbolCooldownCycles = Number.parseFloat(
+  process.env.SAME_SYMBOL_COOLDOWN_CYCLES || `${MIN_SAME_SYMBOL_COOLDOWN_CYCLES}`,
+);
+const SAME_SYMBOL_COOLDOWN_CYCLES = Number.isFinite(configuredSameSymbolCooldownCycles)
+  ? Math.max(MIN_SAME_SYMBOL_COOLDOWN_CYCLES, configuredSameSymbolCooldownCycles)
+  : MIN_SAME_SYMBOL_COOLDOWN_CYCLES;
+
 /**
  * 开仓工具
  */
@@ -57,6 +136,10 @@ export const openPositionTool = createTool({
     const contract = `${symbol}_USDT`;
     
     try {
+      const { getStrategyParams: getStrategyParamsForCheck, getTradingStrategy: getTradingStrategyForCheck } = await import("../../agents/tradingAgent.js");
+      const currentStrategy = getTradingStrategyForCheck();
+      const currentStrategyParams = getStrategyParamsForCheck(currentStrategy);
+
       //  参数验证
       if (!Number.isFinite(amountUsdt) || amountUsdt <= 0) {
         return {
@@ -65,10 +148,12 @@ export const openPositionTool = createTool({
         };
       }
       
-      if (!Number.isFinite(leverage) || leverage < 1 || leverage > RISK_PARAMS.MAX_LEVERAGE) {
+      const effectiveMaxLeverage = Math.min(RISK_PARAMS.MAX_LEVERAGE, currentStrategyParams.leverageMax);
+
+      if (!Number.isFinite(leverage) || leverage < currentStrategyParams.leverageMin || leverage > effectiveMaxLeverage) {
         return {
           success: false,
-          message: `无效的杠杆倍数: ${leverage}（必须在1-${RISK_PARAMS.MAX_LEVERAGE}之间，最大值由环境变量MAX_LEVERAGE控制）`,
+          message: `无效的杠杆倍数: ${leverage}（当前策略 ${currentStrategyParams.name} 必须在${currentStrategyParams.leverageMin}-${effectiveMaxLeverage}倍之间）`,
         };
       }
       
@@ -119,18 +204,17 @@ export const openPositionTool = createTool({
         const now = Date.now();
         const minutesSinceClose = (now - closeTime) / (1000 * 60);
         const intervalMinutes = Number.parseInt(process.env.TRADING_INTERVAL_MINUTES || "5");
-        const cooldownMinutes = intervalMinutes / 2; // 冷静期调整为半个周期
+        const cooldownMinutes = intervalMinutes * SAME_SYMBOL_COOLDOWN_CYCLES;
 
-        
-        // 如果距离上次平仓时间不足半个交易周期，拒绝开仓
+        // 如果距离上次平仓时间不足 3 个交易周期，拒绝开仓
         if (minutesSinceClose < cooldownMinutes) {
           return {
             success: false,
-            message: `拒绝开仓 ${symbol}：该币种在 ${minutesSinceClose.toFixed(1)} 分钟前刚平仓，需要等待至少 ${cooldownMinutes.toFixed(1)} 分钟（半个交易周期）后才能重新开仓。这是为了防止频繁反复交易，造成不必要的手续费损失。`,
+            message: `拒绝开仓 ${symbol}：该币种在 ${minutesSinceClose.toFixed(1)} 分钟前刚平仓，需要等待至少 ${cooldownMinutes.toFixed(1)} 分钟（${SAME_SYMBOL_COOLDOWN_CYCLES} 个交易周期）后才能重新开仓。这是为了防止同一币种短时间内连续试错。`,
           };
         }
         
-        logger.info(`${symbol} 距离上次平仓已 ${minutesSinceClose.toFixed(1)} 分钟，通过冷静期检查（冷静期：${cooldownMinutes.toFixed(1)}分钟）`);
+        logger.info(`${symbol} 距离上次平仓已 ${minutesSinceClose.toFixed(1)} 分钟，通过冷静期检查（冷静期：${cooldownMinutes.toFixed(1)}分钟 / ${SAME_SYMBOL_COOLDOWN_CYCLES}个周期）`);
       }
       
       // 4. 获取账户信息
@@ -145,34 +229,43 @@ export const openPositionTool = createTool({
           message: `账户可用资金异常: ${availableBalance} USDT`,
         };
       }
+
+      const positionSizeMinPercent = Math.max(
+        0,
+        Math.min(currentStrategyParams.positionSizeMin || 0, currentStrategyParams.positionSizeMax || 100),
+      );
+      const minSinglePosition = totalBalance * (positionSizeMinPercent / 100);
+
+      if (amountUsdt < minSinglePosition) {
+        logger.info(
+          `提升 ${symbol} 开仓金额 ${amountUsdt.toFixed(2)} → ${minSinglePosition.toFixed(2)} USDT，匹配 ${currentStrategyParams.name} 策略最小仓位 ${positionSizeMinPercent}%`,
+        );
+        amountUsdt = minSinglePosition;
+      }
       
-      // 5. 检查账户回撤（从数据库获取初始净值和峰值净值）
-      // 注释：已移除回撤10%禁止开仓的限制
-      // const initialBalanceResult = await dbClient.execute(
-      //   "SELECT total_value FROM account_history ORDER BY timestamp ASC LIMIT 1"
-      // );
-      // const initialBalance = initialBalanceResult.rows[0]
-      //   ? Number.parseFloat(initialBalanceResult.rows[0].total_value as string)
-      //   : totalBalance;
-      // 
-      // const peakBalanceResult = await dbClient.execute(
-      //   "SELECT MAX(total_value) as peak FROM account_history"
-      // );
-      // const peakBalance = peakBalanceResult.rows[0]?.peak 
-      //   ? Number.parseFloat(peakBalanceResult.rows[0].peak as string)
-      //   : totalBalance;
-      // 
-      // const drawdownFromPeak = peakBalance > 0 
-      //   ? ((peakBalance - totalBalance) / peakBalance) * 100 
-      //   : 0;
-      // 
-      // if (drawdownFromPeak >= RISK_PARAMS.ACCOUNT_DRAWDOWN_NO_NEW_POSITION_PERCENT) {
-      //   return {
-      //     success: false,
-      //     message: `账户回撤已达 ${drawdownFromPeak.toFixed(2)}% ≥ ${RISK_PARAMS.ACCOUNT_DRAWDOWN_NO_NEW_POSITION_PERCENT}%，触发风控保护，禁止新开仓`,
-      //   };
-      // }
-      
+      // 5. 检查账户回撤（从峰值回撤超过阈值时禁止开仓）
+      const peakBalanceResult = await dbClient.execute(
+        "SELECT MAX(total_value) as peak FROM account_history"
+      );
+      const peakBalance = peakBalanceResult.rows[0]?.peak
+        ? Number.parseFloat(peakBalanceResult.rows[0].peak as string)
+        : totalBalance;
+
+      const drawdownFromPeak = peakBalance > 0
+        ? ((peakBalance - totalBalance) / peakBalance) * 100
+        : 0;
+
+      if (drawdownFromPeak >= RISK_PARAMS.ACCOUNT_DRAWDOWN_NO_NEW_POSITION_PERCENT) {
+        return {
+          success: false,
+          message: `账户回撤已达 ${drawdownFromPeak.toFixed(2)}% ≥ ${RISK_PARAMS.ACCOUNT_DRAWDOWN_NO_NEW_POSITION_PERCENT}%，触发风控保护，禁止新开仓。请等待账户回升后再交易。`,
+        };
+      }
+
+      if (drawdownFromPeak >= RISK_PARAMS.ACCOUNT_DRAWDOWN_WARNING_PERCENT) {
+        logger.warn(`⚠️ 账户回撤 ${drawdownFromPeak.toFixed(2)}% 已达警告阈值 ${RISK_PARAMS.ACCOUNT_DRAWDOWN_WARNING_PERCENT}%，请谨慎交易`);
+      }
+
       // 6. 检查总敞口（不超过账户净值的15倍）
       let currentTotalExposure = 0;
       for (const pos of activePositions) {
@@ -196,10 +289,37 @@ export const openPositionTool = createTool({
         };
       }
       
-      // 7. 检查单笔仓位（建议不超过账户净值的30%）
-      const maxSinglePosition = totalBalance * 0.30; // 30%
+      // 7. 检查单笔仓位（强制不超过策略的 positionSizeMax）
+      const positionSizeMaxPercent = currentStrategyParams.positionSizeMax || 30;
+      const maxSinglePosition = totalBalance * (positionSizeMaxPercent / 100);
       if (amountUsdt > maxSinglePosition) {
-        logger.warn(`开仓金额 ${amountUsdt.toFixed(2)} USDT 超过建议仓位 ${maxSinglePosition.toFixed(2)} USDT（账户净值的30%）`);
+        return {
+          success: false,
+          message: `开仓金额 ${amountUsdt.toFixed(2)} USDT 超过策略允许的最大仓位 ${maxSinglePosition.toFixed(2)} USDT（账户净值的${positionSizeMaxPercent}%），拒绝开仓`,
+        };
+      }
+
+      // 8. 检查总保证金占比（如果策略定义了 maxTotalMarginPercent）
+      if (currentStrategyParams.maxTotalMarginPercent) {
+        let currentTotalMargin = 0;
+        for (const pos of activePositions) {
+          const posSize = Math.abs(Number.parseInt(pos.size || "0"));
+          const entryPrice = Number.parseFloat(pos.entryPrice || "0");
+          const posLeverage = Number.parseInt(pos.leverage || "1");
+          const posQuantoMult = await getQuantoMultiplier(pos.contract);
+          const posMargin = (posSize * entryPrice * posQuantoMult) / posLeverage;
+          currentTotalMargin += posMargin;
+        }
+        const newMargin = amountUsdt;
+        const totalMargin = currentTotalMargin + newMargin;
+        const maxTotalMargin = totalBalance * (currentStrategyParams.maxTotalMarginPercent / 100);
+
+        if (totalMargin > maxTotalMargin) {
+          return {
+            success: false,
+            message: `新开仓将导致总保证金 ${totalMargin.toFixed(2)} USDT 超过策略限制 ${maxTotalMargin.toFixed(2)} USDT（账户净值的${currentStrategyParams.maxTotalMarginPercent}%），拒绝开仓`,
+          };
+        }
       }
       
       // ====== 流动性保护检查 ======
@@ -301,13 +421,16 @@ export const openPositionTool = createTool({
       // 根据波动率调整参数
       if (volatilityLevel === "high") {
         const adjustment = strategyParams.volatilityAdjustment.highVolatility;
-        adjustedLeverage = Math.max(1, Math.round(leverage * adjustment.leverageFactor));
+        adjustedLeverage = Math.max(currentStrategyParams.leverageMin, Math.round(leverage * adjustment.leverageFactor));
         adjustedAmountUsdt = Math.max(10, amountUsdt * adjustment.positionFactor);
         logger.info(`🌊 高波动市场 (ATR ${atrPercent.toFixed(2)}%)：杠杆 ${leverage}x → ${adjustedLeverage}x，仓位 ${amountUsdt.toFixed(0)} → ${adjustedAmountUsdt.toFixed(0)} USDT`);
       } else if (volatilityLevel === "low") {
         const adjustment = strategyParams.volatilityAdjustment.lowVolatility;
-        adjustedLeverage = Math.min(RISK_PARAMS.MAX_LEVERAGE, Math.round(leverage * adjustment.leverageFactor));
-        adjustedAmountUsdt = Math.min(totalBalance * 0.32, amountUsdt * adjustment.positionFactor);
+        adjustedLeverage = Math.min(effectiveMaxLeverage, Math.max(currentStrategyParams.leverageMin, Math.round(leverage * adjustment.leverageFactor)));
+        adjustedAmountUsdt = Math.min(
+          totalBalance * ((currentStrategyParams.positionSizeMax || 32) / 100),
+          amountUsdt * adjustment.positionFactor,
+        );
         logger.info(`🌊 低波动市场 (ATR ${atrPercent.toFixed(2)}%)：杠杆 ${leverage}x → ${adjustedLeverage}x，仓位 ${amountUsdt.toFixed(0)} → ${adjustedAmountUsdt.toFixed(0)} USDT`);
       } else {
         logger.info(`🌊 正常波动市场 (ATR ${atrPercent.toFixed(2)}%)：保持原始参数`);
@@ -946,11 +1069,43 @@ export const closePositionTool = createTool({
         ],
       });
       
-      // 从数据库获取止损止盈订单ID（如果存在）
+      const fullyClosed = actualCloseSize >= quantity - 1e-8;
+      const actualPnlPercent = calculateLeveragedPnlPercent(entryPrice, actualExitPrice, side, leverage);
+
+      // 从数据库获取止损止盈订单ID和保护状态（如果存在）
       const posResult = await dbClient.execute({
-        sql: "SELECT sl_order_id, tp_order_id FROM positions WHERE symbol = ?",
+        sql: `SELECT sl_order_id, tp_order_id, partial_close_percentage, stop_loss, peak_pnl_percent
+              FROM positions WHERE symbol = ?`,
         args: [symbol],
       });
+
+      if (!fullyClosed && posResult.rows.length > 0 && pnl > 0) {
+        const dbPosition = posResult.rows[0] as any;
+        const currentPartialClose = parseNullableNumber(dbPosition.partial_close_percentage) ?? 0;
+        const currentStopLoss = parseNullableNumber(dbPosition.stop_loss);
+        const currentPeakPnl = parseNullableNumber(dbPosition.peak_pnl_percent) ?? 0;
+
+        const nextPartialClose = mergePartialClosePercentage(
+          currentPartialClose,
+          quantity,
+          actualCloseSize,
+        );
+        const profitProtectionStop = await getProfitProtectionStopPercent(actualPnlPercent);
+        const nextStopLoss =
+          currentStopLoss !== null ? Math.max(currentStopLoss, profitProtectionStop) : profitProtectionStop;
+        const nextPeakPnl = Math.max(currentPeakPnl, actualPnlPercent);
+
+        await dbClient.execute({
+          sql: `UPDATE positions
+                SET partial_close_percentage = ?, stop_loss = ?, peak_pnl_percent = ?
+                WHERE symbol = ?`,
+          args: [nextPartialClose, nextStopLoss, nextPeakPnl, symbol],
+        });
+
+        logger.info(
+          `【尾仓保护已启用】${symbol} 已累计分批 ${nextPartialClose.toFixed(2)}%，剩余仓位保护止损提升至 ${nextStopLoss.toFixed(2)}%`,
+        );
+      }
       
       // 取消止损止盈订单（先检查订单状态）
       if (posResult.rows.length > 0) {
@@ -985,8 +1140,8 @@ export const closePositionTool = createTool({
         }
       }
       
-      // 如果全部平仓，从持仓表删除；否则不操作（交由同步任务更新）
-      if (percentage === 100) {
+      // 如果实际已全部平仓，从持仓表删除；否则保留持仓并等待同步任务更新实时数量
+      if (fullyClosed) {
         await dbClient.execute({
           sql: "DELETE FROM positions WHERE symbol = ?",
           args: [symbol],
@@ -1047,4 +1202,3 @@ export const cancelOrderTool = createTool({
     }
   },
 });
-

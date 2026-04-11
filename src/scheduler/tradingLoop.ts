@@ -27,6 +27,7 @@ import { createExchangeClient } from "../services/exchangeClient";
 import { getChinaTimeISO } from "../utils/timeUtils";
 import { RISK_PARAMS } from "../config/riskParams";
 import { getQuantoMultiplier } from "../utils/contractUtils";
+import { initNewsClient, fetchCryptoNews, fetchExchangeAnnouncements, fetchLatestEvents, aggregateSentiment } from "../services/newsClient";
 
 const logger = createLogger({
   name: "trading-loop",
@@ -229,6 +230,40 @@ async function collectMarketData() {
   }
 
   return marketData;
+}
+
+/**
+ * 收集消息面数据（快讯/公告/社交情绪）
+ * 遍历 SYMBOLS 列表，为每个币种获取消息面数据
+ * 失败不影响主流程
+ */
+async function collectNewsData(): Promise<Record<string, any>> {
+  const newsData: Record<string, any> = {};
+
+  if (process.env.GATE_NEWS_MCP_ENABLED === "false") {
+    return newsData;
+  }
+
+  for (const symbol of SYMBOLS) {
+    try {
+      const [newsResult, announcementsResult, eventsResult] = await Promise.allSettled([
+        fetchCryptoNews(symbol, 5),
+        fetchExchangeAnnouncements(symbol, 5),
+        fetchLatestEvents(symbol, 5),
+      ]);
+
+      const news = newsResult.status === "fulfilled" ? newsResult.value : [];
+      const announcements = announcementsResult.status === "fulfilled" ? announcementsResult.value : [];
+      const events = eventsResult.status === "fulfilled" ? eventsResult.value : [];
+      const sentiment = news.length > 0 ? aggregateSentiment(news) : null;
+
+      newsData[symbol] = { news, announcements, events, sentiment };
+    } catch (error) {
+      logger.warn(`获取 ${symbol} 消息面数据失败:`, error as any);
+      newsData[symbol] = { news: [], announcements: [], events: [], sentiment: null };
+    }
+  }
+  return newsData;
 }
 
 /**
@@ -759,13 +794,19 @@ async function getPositions(cachedGatePositions?: any[]) {
     // 如果提供了缓存数据，使用缓存；否则重新获取
     const gatePositions = cachedGatePositions || await exchangeClient.getPositions();
     
-    // 从数据库获取持仓的开仓时间、峰值盈利和杠杆数（数据库中保存了正确的数据）
-    const dbResult = await dbClient.execute("SELECT symbol, opened_at, peak_pnl_percent, leverage FROM positions");
+    // 从数据库获取持仓的开仓时间、峰值盈利、分批状态和保护止损
+    const dbResult = await dbClient.execute(
+      "SELECT symbol, opened_at, peak_pnl_percent, leverage, partial_close_percentage, stop_loss FROM positions"
+    );
     const dbDataMap = new Map(
       dbResult.rows.map((row: any) => [row.symbol, {
         opened_at: row.opened_at,
         peak_pnl_percent: Number.parseFloat(row.peak_pnl_percent as string || "0"),
-        leverage: Number.parseInt(row.leverage as string || "1")
+        leverage: Number.parseInt(row.leverage as string || "1"),
+        partial_close_percentage: Number.parseFloat(row.partial_close_percentage as string || "0"),
+        stop_loss: row.stop_loss === null || row.stop_loss === undefined
+          ? null
+          : Number.parseFloat(row.stop_loss as string),
       }])
     );
     
@@ -780,6 +821,8 @@ async function getPositions(cachedGatePositions?: any[]) {
         const dbData = dbDataMap.get(symbol);
         let openedAt = dbData?.opened_at;
         const peakPnlPercent = dbData?.peak_pnl_percent || 0;
+        const partialClosePercentage = dbData?.partial_close_percentage || 0;
+        const stopLossOverride = dbData?.stop_loss ?? null;
         const gateLeverage = Number.parseInt(p.leverage || "1");
         
         // 🔧 修复：优先使用数据库中记录的杠杆数（开仓时的杠杆数），而不是 Gate.io 的实时杠杆数
@@ -822,6 +865,8 @@ async function getPositions(cachedGatePositions?: any[]) {
           margin: Number.parseFloat(p.margin || "0"),
           opened_at: openedAt,
           peak_pnl_percent: peakPnlPercent, // 添加峰值盈利字段
+          partial_close_percentage: partialClosePercentage,
+          stop_loss: stopLossOverride,
         };
       });
     
@@ -1129,13 +1174,37 @@ async function executeTradingDecision() {
   logger.info(`${"=".repeat(80)}\n`);
 
   let marketData: any = {};
+  let newsData: Record<string, any> = {};
   let accountInfo: any = null;
   let positions: any[] = [];
 
   try {
-    // 1. 收集市场数据
+    // 1. 并行收集市场数据和消息面数据
     try {
-      marketData = await collectMarketData();
+      const [marketResult, newsResult] = await Promise.allSettled([
+        collectMarketData(),
+        collectNewsData(),
+      ]);
+
+      if (marketResult.status === "fulfilled") {
+        marketData = marketResult.value;
+      } else {
+        throw marketResult.reason;
+      }
+
+      if (newsResult.status === "fulfilled") {
+        newsData = newsResult.value;
+        const newsSymbols = Object.keys(newsData).filter(s => {
+          const d = newsData[s];
+          return d && (d.news?.length > 0 || d.announcements?.length > 0 || d.sentiment);
+        });
+        if (newsSymbols.length > 0) {
+          logger.info(`消息面数据获取成功: ${newsSymbols.join(", ")}`);
+        }
+      } else {
+        logger.warn("消息面数据获取失败，继续使用技术面数据");
+      }
+
       const validSymbols = SYMBOLS.filter(symbol => {
         const data = marketData[symbol];
         if (!data || data.price === 0) {
@@ -1525,6 +1594,7 @@ async function executeTradingDecision() {
       iteration: iterationCount,
       intervalMinutes,
       marketData,
+      newsData,
       accountInfo,
       positions,
       tradeHistory,
@@ -1722,6 +1792,13 @@ export async function initTradingSystem() {
   }
   
   logger.info(`最终配置: 止损线=${accountRiskConfig.stopLossUsdt} USDT, 止盈线=${accountRiskConfig.takeProfitUsdt} USDT`);
+  
+  // 3. 初始化 Gate News MCP 客户端（消息面数据）
+  try {
+    await initNewsClient();
+  } catch (error) {
+    logger.warn("Gate News MCP 初始化失败，消息面数据将不可用:", error as any);
+  }
 }
 
 /**
@@ -1760,4 +1837,3 @@ export function setTradingStartTime(time: Date) {
 export function setIterationCount(count: number) {
   iterationCount = count;
 }
-

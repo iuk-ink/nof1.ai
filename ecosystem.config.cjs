@@ -26,6 +26,7 @@ module.exports = {
       script: "./dist/index.js",
       instances: 1,
       exec_mode: "fork",
+      node_args: "--max-old-space-size=500",
       watch: false,
       autorestart: true,
       max_restarts: 10,
